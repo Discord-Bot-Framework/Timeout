@@ -67,17 +67,31 @@ database = Store(DB_PATH, DBS, map_size=DB_MAP_SIZE)
 class BaseDB:
     __slots__ = ()
 
+    @staticmethod
+    def _resolve_env(_: lmdb.Environment | None) -> lmdb.Environment | None:
+        database.open()
+        return database.env
+
     @classmethod
     def get_database(cls) -> str:
         raise NotImplementedError
 
     @classmethod
     def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, typing.Any]]:
-        return list_mapping_records(env, database, cls.get_database())
+        return list_mapping_records(
+            cls._resolve_env(env),
+            database,
+            cls.get_database(),
+        )
 
     @classmethod
     def delete(cls, env: lmdb.Environment | None, key: bytes) -> bool:
-        return delete_record(env, database, cls.get_database(), key)
+        return delete_record(
+            cls._resolve_env(env),
+            database,
+            cls.get_database(),
+            key,
+        )
 
 
 class AdminDB(BaseDB):
@@ -95,7 +109,7 @@ class AdminDB(BaseDB):
     def add(cls, env: lmdb.Environment | None, id: int, type: int) -> None:
         key: bytes = f"{id}:{type}".encode()
         put_mapping_record(
-            env,
+            cls._resolve_env(env),
             database,
             cls.get_database(),
             key,
@@ -129,7 +143,7 @@ class ModeratorDB(BaseDB):
     ) -> None:
         key: bytes = f"{id}:{type}:{channel_id}".encode()
         put_mapping_record(
-            env,
+            cls._resolve_env(env),
             database,
             cls.get_database(),
             key,
@@ -163,7 +177,7 @@ class GlobalModeratorDB(BaseDB):
     def add(cls, env: lmdb.Environment | None, id: int, type: int) -> None:
         key: bytes = f"{id}:{type}".encode()
         put_mapping_record(
-            env,
+            cls._resolve_env(env),
             database,
             cls.get_database(),
             key,
@@ -212,7 +226,7 @@ class TimeoutMemberDB(BaseDB):
     ) -> None:
         key: bytes = f"{id}:{channel_id}".encode()
         put_mapping_record(
-            env,
+            cls._resolve_env(env),
             database,
             cls.get_database(),
             key,
@@ -255,7 +269,7 @@ class SettingDB(BaseDB):
     ) -> None:
         key: bytes = str(type).encode()
         put_mapping_record(
-            env,
+            cls._resolve_env(env),
             database,
             cls.get_database(),
             key,
@@ -536,7 +550,9 @@ def _upsert_timeout_member(timeout_member: TimeoutMember) -> None:
                 break
     _timeout_member_by_key[key] = timeout_member
     _timeout_members_by_user[timeout_member.id].add(key)
-    if any(user_key[1] == -1 for user_key in _timeout_members_by_user[timeout_member.id]):
+    if any(
+        user_key[1] == -1 for user_key in _timeout_members_by_user[timeout_member.id]
+    ):
         _global_timeout_user_ids.add(timeout_member.id)
 
 
@@ -552,7 +568,10 @@ def _delete_timeout_member(timeout_member: TimeoutMember) -> bool:
         user_keys.discard(key)
         if not user_keys:
             _timeout_members_by_user.pop(timeout_member.id, None)
-    if not any(user_key[1] == -1 for user_key in _timeout_members_by_user.get(timeout_member.id, set())):
+    if not any(
+        user_key[1] == -1
+        for user_key in _timeout_members_by_user.get(timeout_member.id, set())
+    ):
         _global_timeout_user_ids.discard(timeout_member.id)
     return True
 
@@ -565,7 +584,11 @@ def _get_timeout_members_for_user(user_id: int) -> list[TimeoutMember]:
     keys = _timeout_members_by_user.get(user_id)
     if not keys:
         return []
-    return [member for key in keys if (member := _timeout_member_by_key.get(key)) is not None]
+    return [
+        member
+        for key in keys
+        if (member := _timeout_member_by_key.get(key)) is not None
+    ]
 
 
 def _has_any_admin_role(
@@ -752,7 +775,8 @@ async def check_channel_moderator(ctx: arc.GatewayContext) -> arc.HookResult:
     cmod_user = ctx.author.id in _channel_moderator_user_ids.get(channel_id, set())
     res_user = cmod_user
     res_role = bool(
-        member is not None and _has_any_channel_moderator_role(channel_id, member.role_ids),
+        member is not None
+        and _has_any_channel_moderator_role(channel_id, member.role_ids),
     )
     if res_user or res_role:
         return arc.HookResult(abort=False)
@@ -773,7 +797,6 @@ class TimeoutState:
         self.startup_flag = False
         self.lock_db: asyncio.Lock = asyncio.Lock()
         self._shutdown = False
-        self._shutdown_lock = asyncio.Lock()
 
     @property
     def miru_client(self) -> miru.Client:
@@ -857,7 +880,8 @@ class TimeoutState:
             return
         self.startup_flag = True
         app = typing.cast("hikari.GatewayBot", self.client.app)
-        await app.wait_for(hikari.StartedEvent, timeout=None)
+        if not app.is_alive:
+            await app.wait_for(hikari.StartedEvent, timeout=None)
         current_datetime = _now_utc()
         for timeout_member in tuple(timeout_members):
             duration_minutes: float = (
@@ -875,17 +899,15 @@ class TimeoutState:
                 )
 
     def drop(self) -> None:
-        async def _do_shutdown() -> None:
-            async with self._shutdown_lock:
-                if self._shutdown:
-                    return
-                self._shutdown = True
-                for task in tuple(timeout_tasks.values()):
-                    task.cancel()
-                timeout_tasks.clear()
-                database.close()
-
-        asyncio.create_task(_do_shutdown())
+        global env
+        if self._shutdown:
+            return
+        self._shutdown = True
+        for task in tuple(timeout_tasks.values()):
+            task.cancel()
+        timeout_tasks.clear()
+        database.close()
+        env = None
 
     def init_task(self, state: TimeoutState) -> asyncio.Task[None]:
         return asyncio.create_task(state.async_init())
@@ -1107,7 +1129,10 @@ class TimeoutState:
             await respond("Failed to target channel moderator.")
             return False
 
-        if prisoner_member.id in _guild_moderator_user_ids or _has_any_guild_moderator_role(list(member_role_ids)):
+        if (
+            prisoner_member.id in _guild_moderator_user_ids
+            or _has_any_guild_moderator_role(list(member_role_ids))
+        ):
             await respond("Failed to target guild moderator.")
             return False
 
@@ -1244,7 +1269,10 @@ class TimeoutState:
 
         member_role_ids = frozenset(prisoner_member.role_ids)
 
-        if prisoner_member.id in _guild_moderator_user_ids or _has_any_guild_moderator_role(list(member_role_ids)):
+        if (
+            prisoner_member.id in _guild_moderator_user_ids
+            or _has_any_guild_moderator_role(list(member_role_ids))
+        ):
             await respond("Failed to target guild moderator.")
             return False
 
@@ -1325,7 +1353,11 @@ class TimeoutState:
         except asyncio.CancelledError:
             pass
 
-    async def send_log(self, message: str, colour: int = 0) -> None:
+    async def send_log(
+        self,
+        message: str,
+        colour: int | Color = Color.INFO,
+    ) -> None:
         channel_config: Config = _setting(SettingType.LOG_CHANNEL)
         if channel_config.secondary_value is None:
             return
@@ -1333,15 +1365,23 @@ class TimeoutState:
             channel_id = int(channel_config.primary_value)
         except (TypeError, ValueError):
             return
+        try:
+            color_value = colour if isinstance(colour, Color) else Color(colour)
+        except ValueError:
+            color_value = Color.INFO
         embed = await reply_embed(
             self.client.app,
             "Timeout",
             message,
-            Color(colour),
+            color_value,
         )
         try:
             await self.client.app.rest.create_message(channel_id, embed=embed)
-        except (hikari.ForbiddenError, hikari.NotFoundError):
+        except (
+            hikari.BadRequestError,
+            hikari.ForbiddenError,
+            hikari.NotFoundError,
+        ):
             return
 
 
@@ -1632,8 +1672,12 @@ async def member_create(event: hikari.MemberCreateEvent) -> None:
     cdt = _now_utc()
     cps = _get_timeout_members_for_user(event.member.id)
     for cp in cps:
-        duration_minutes_float: float = (_ensure_utc(cp.release_datetime) - cdt).total_seconds() / 60
-        duration_minutes: int = math.ceil(duration_minutes_float) if duration_minutes_float > 0 else 1
+        duration_minutes_float: float = (
+            _ensure_utc(cp.release_datetime) - cdt
+        ).total_seconds() / 60
+        duration_minutes: int = (
+            math.ceil(duration_minutes_float) if duration_minutes_float > 0 else 1
+        )
         await state.release(cp)
 
         if cp.is_global:
@@ -1766,7 +1810,9 @@ async def cmd_setting_insert(
             view=view,
         )
         if message is None:
-            msg = "Failed to retrieve interaction response message for miru view binding."
+            msg = (
+                "Failed to retrieve interaction response message for miru view binding."
+            )
             raise RuntimeError(msg)
 
     if target == "admin":
@@ -1844,7 +1890,11 @@ async def autocomplete_invert_user(
     valid_members = [m for m in members if isinstance(m, hikari.Member)]
 
     if option_input:
-        valid_members = [m for m in valid_members if option_input in name_display(m) or option_input in m.username]
+        valid_members = [
+            m
+            for m in valid_members
+            if option_input in name_display(m) or option_input in m.username
+        ]
 
     return {name_display(m): str(m.id) for m in valid_members[:25]}
 
@@ -1992,8 +2042,12 @@ async def module_group_setting_invert(
                     admin_entity.id,
                     admin_entity.type,
                 )
-        member = await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
-        role_obj = await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        member = (
+            await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
+        )
+        role_obj = (
+            await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        )
         await reply_ok(
             state.client.app,
             ctx,
@@ -2047,8 +2101,12 @@ async def module_group_setting_invert(
                     gm.id,
                     gm.type,
                 )
-        member = await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
-        role_obj = await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        member = (
+            await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
+        )
+        role_obj = (
+            await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        )
         await reply_ok(
             state.client.app,
             ctx,
@@ -2106,8 +2164,12 @@ async def module_group_setting_invert(
                     cm.type,
                     cm.channel_id,
                 )
-        member = await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
-        role_obj = await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        member = (
+            await fetch_member(state, int(ctx.guild_id), user_id) if user_id else None
+        )
+        role_obj = (
+            await fetch_role(state, int(ctx.guild_id), role_id) if role_id else None
+        )
         await reply_ok(
             state.client.app,
             ctx,
@@ -2263,7 +2325,11 @@ async def cmd_setting_view(
             if cache is not None:
                 members = cache.get_members_view_for_guild(guild_id)
                 if members is not None:
-                    for member in [member for member in members.values() if entry.id in member.role_ids]:
+                    for member in [
+                        member
+                        for member in members.values()
+                        if entry.id in member.role_ids
+                    ]:
                         lines.append(f"  - User: {member.mention}")
         return lines
 
@@ -2311,7 +2377,11 @@ async def cmd_setting_view(
             if moderator.channel_id != channel.id:
                 continue
             lines.extend(await format_moderator_entry(state, guild_id, moderator))
-        msg = "\n".join(lines) if lines else f"No channel moderators configured for {channel.mention}"
+        msg = (
+            "\n".join(lines)
+            if lines
+            else f"No channel moderators configured for {channel.mention}"
+        )
         await send_pagination(
             state,
             ctx,
@@ -2327,7 +2397,9 @@ async def cmd_setting_view(
         channel = await fetch_channel(state, ctx.channel_id)
         channel = await fetch_parent_channel(state, channel)
         now = _now_utc()
-        channel_prisoners = [p for p in timeout_members if p.channel_id == channel.id and not p.is_global]
+        channel_prisoners = [
+            p for p in timeout_members if p.channel_id == channel.id and not p.is_global
+        ]
         global_prisoners = [p for p in timeout_members if p.is_global]
         lines: list[str] = []
         if channel_prisoners:
@@ -2371,20 +2443,32 @@ async def cmd_setting_view(
         )
         lines.append(f"Log channel: {log_channel_status}")
         lines.append(f"Timeout limit: `{minute_config.primary_value} minutes`")
-        lines.append("\nAdmins:")
+        lines.append("")
+        lines.append("Admins:")
         for admin in admins:
             lines.extend(await format_moderator_entry(state, guild_id, admin))
-        lines.append("\nGuild moderators:")
+        if not admins:
+            lines.append("- None configured")
+
+        lines.append("")
+        lines.append("Guild moderators:")
         for moderator in guild_moderators:
             lines.extend(await format_moderator_entry(state, guild_id, moderator))
+        if not guild_moderators:
+            lines.append("- None configured")
         channel_moderators_by_channel: dict[int, list[ChannelModerator]] = {}
         for cm in channel_moderators:
             channel_moderators_by_channel.setdefault(cm.channel_id, []).append(cm)
         for channel_id, moderators in channel_moderators_by_channel.items():
-            channel = state.client.app.cache.get_guild_channel(channel_id) if state.client.app.cache else None
+            channel = (
+                state.client.app.cache.get_guild_channel(channel_id)
+                if state.client.app.cache
+                else None
+            )
             if channel is None:
                 continue
-            lines.append(f"\nModerating {channel.mention}:")
+            lines.append("")
+            lines.append(f"Moderating {channel.mention}:")
             for moderator in moderators:
                 lines.extend(await format_moderator_entry(state, guild_id, moderator))
         prisoners_by_channel: dict[int, list[TimeoutMember]] = {}
@@ -2394,10 +2478,15 @@ async def cmd_setting_view(
             )
         now = _now_utc()
         for channel_id, channel_prisoners in prisoners_by_channel.items():
-            channel = state.client.app.cache.get_guild_channel(channel_id) if state.client.app.cache else None
+            channel = (
+                state.client.app.cache.get_guild_channel(channel_id)
+                if state.client.app.cache
+                else None
+            )
             if channel is None:
                 continue
-            lines.append(f"\nFound timed out users in {channel.mention}:")
+            lines.append("")
+            lines.append(f"Found timed out users in {channel.mention}:")
             for timeout_member in channel_prisoners:
                 timeleft = _ensure_utc(timeout_member.release_datetime) - now
                 member = await fetch_member(state, guild_id, timeout_member.id)
@@ -2407,7 +2496,7 @@ async def cmd_setting_view(
         await send_pagination(
             state,
             ctx,
-            f"Timeout Configuration:\n\n{''.join(lines)}",
+            f"Timeout Configuration:\n\n{'\n'.join(lines)}",
             page_size=1000,
         )
 
@@ -2523,7 +2612,9 @@ async def autocomplete_guild_release(
     )
     valid_members = [m for m in members if isinstance(m, hikari.Member)]
     filtered = [
-        m for m in valid_members if option_input in (name_display(m) or m.username) or option_input in m.username
+        m
+        for m in valid_members
+        if option_input in (name_display(m) or m.username) or option_input in m.username
     ]
     return {(name_display(m) or m.username): str(m.id) for m in filtered[:25]}
 
@@ -2592,7 +2683,9 @@ async def autocomplete_channel_release(
         ),
         return_exceptions=True,
     )
-    members: list[hikari.Member] = [m for m in options_user if isinstance(m, hikari.Member)]
+    members: list[hikari.Member] = [
+        m for m in options_user if isinstance(m, hikari.Member)
+    ]
     return {
         name_display(m): str(m.id)
         for m in members[:25]
@@ -2656,6 +2749,9 @@ def load(client: arc.GatewayClient) -> None:
     if _state is not None:
         return
 
+    database.open()
+    global env
+    env = database.env
     state = TimeoutState(client)
     _state = state
     client.add_plugin(plugin)
