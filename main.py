@@ -21,7 +21,7 @@ from src.shared.persistence.repository import (
     list_mapping_records,
     put_mapping_record,
 )
-from src.shared.persistence.store import Store
+from src.shared.persistence.store import LmdbEnvironment, Store
 from src.shared.utils.view import (
     Color,
     bind_view_to_response,
@@ -42,16 +42,16 @@ if typing.TYPE_CHECKING:
         Sequence,
     )
 
-    import lmdb
-
-DB_PATH: pathlib.Path = pathlib.Path(__file__).parent / "timeout"
-DB_MAP_SIZE: int = 50 * 1024 * 1024
-DB_ADMIN: typing.Literal["admin"] = "admin"
-DB_CHANNEL_MODERATOR: typing.Literal["channel_moderator"] = "channel_moderator"
-DB_GUILD_MODERATOR: typing.Literal["guild_moderator"] = "guild_moderator"
-DB_TIMEOUT_MEMBER: typing.Literal["timeout_member"] = "timeout_member"
-DB_SETTING: typing.Literal["primary_value"] = "primary_value"
-DBS: tuple[str, ...] = (
+DB_PATH: typing.Final[pathlib.Path] = pathlib.Path(__file__).parent / "timeout"
+DB_MAP_SIZE: typing.Final[int] = 50 * 1024 * 1024
+DB_ADMIN: typing.Final[typing.Literal["admin"]] = "admin"
+DB_CHANNEL_MODERATOR: typing.Final[typing.Literal["channel_moderator"]] = (
+    "channel_moderator"
+)
+DB_GUILD_MODERATOR: typing.Final[typing.Literal["guild_moderator"]] = "guild_moderator"
+DB_TIMEOUT_MEMBER: typing.Final[typing.Literal["timeout_member"]] = "timeout_member"
+DB_SETTING: typing.Final[typing.Literal["primary_value"]] = "primary_value"
+DBS: typing.Final[tuple[str, ...]] = (
     DB_ADMIN,
     DB_CHANNEL_MODERATOR,
     DB_GUILD_MODERATOR,
@@ -68,7 +68,7 @@ class BaseDB:
     __slots__ = ()
 
     @staticmethod
-    def _resolve_env(_: lmdb.Environment | None) -> lmdb.Environment | None:
+    def _resolve_env(_: LmdbEnvironment | None) -> LmdbEnvironment | None:
         database.open()
         return database.env
 
@@ -77,7 +77,7 @@ class BaseDB:
         raise NotImplementedError
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, typing.Any]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, typing.Any]]:
         return list_mapping_records(
             cls._resolve_env(env),
             database,
@@ -85,7 +85,7 @@ class BaseDB:
         )
 
     @classmethod
-    def delete(cls, env: lmdb.Environment | None, key: bytes) -> bool:
+    def delete(cls, env: LmdbEnvironment | None, key: bytes) -> bool:
         return delete_record(
             cls._resolve_env(env),
             database,
@@ -102,11 +102,11 @@ class AdminDB(BaseDB):
         return DB_ADMIN
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, int]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, int]]:
         return typing.cast("list[dict[str, int]]", super().get_databases(env))
 
     @classmethod
-    def add(cls, env: lmdb.Environment | None, id: int, type: int) -> None:
+    def add(cls, env: LmdbEnvironment | None, id: int, type: int) -> None:
         key: bytes = f"{id}:{type}".encode()
         put_mapping_record(
             cls._resolve_env(env),
@@ -117,7 +117,7 @@ class AdminDB(BaseDB):
         )
 
     @classmethod
-    def delete_admin(cls, env: lmdb.Environment | None, id: int, type: int) -> bool:
+    def delete_admin(cls, env: LmdbEnvironment | None, id: int, type: int) -> bool:
         key: bytes = f"{id}:{type}".encode()
         return BaseDB.delete(env, key)
 
@@ -130,13 +130,13 @@ class ModeratorDB(BaseDB):
         return DB_CHANNEL_MODERATOR
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, int]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, int]]:
         return typing.cast("list[dict[str, int]]", super().get_databases(env))
 
     @classmethod
     def add(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         id: int,
         type: int,
         channel_id: int,
@@ -153,7 +153,7 @@ class ModeratorDB(BaseDB):
     @classmethod
     def delete_moderator(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         id: int,
         type: int,
         channel_id: int,
@@ -170,11 +170,11 @@ class GlobalModeratorDB(BaseDB):
         return "guild_moderator"
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, int]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, int]]:
         return typing.cast("list[dict[str, int]]", super().get_databases(env))
 
     @classmethod
-    def add(cls, env: lmdb.Environment | None, id: int, type: int) -> None:
+    def add(cls, env: LmdbEnvironment | None, id: int, type: int) -> None:
         key: bytes = f"{id}:{type}".encode()
         put_mapping_record(
             cls._resolve_env(env),
@@ -187,7 +187,7 @@ class GlobalModeratorDB(BaseDB):
     @classmethod
     def delete_global_moderator(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         id: int,
         type: int,
     ) -> bool:
@@ -203,7 +203,7 @@ class TimeoutMemberDB(BaseDB):
         return DB_TIMEOUT_MEMBER
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, typing.Any]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, typing.Any]]:
         result = super().get_databases(env)
         for data in result:
             release_dt = data.get("release_datetime")
@@ -219,7 +219,7 @@ class TimeoutMemberDB(BaseDB):
     @classmethod
     def add(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         id: int,
         channel_id: int,
         release_datetime: datetime.datetime,
@@ -240,7 +240,7 @@ class TimeoutMemberDB(BaseDB):
     @classmethod
     def delete_prisoner(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         id: int,
         channel_id: int,
     ) -> bool:
@@ -256,13 +256,13 @@ class SettingDB(BaseDB):
         return DB_SETTING
 
     @classmethod
-    def get_databases(cls, env: lmdb.Environment | None) -> list[dict[str, typing.Any]]:
+    def get_databases(cls, env: LmdbEnvironment | None) -> list[dict[str, typing.Any]]:
         return super().get_databases(env)
 
     @classmethod
     def upsert_setting(
         cls,
-        env: lmdb.Environment | None,
+        env: LmdbEnvironment | None,
         type: int,
         primary_value: int,
         secondary_value: str | None,
@@ -282,7 +282,7 @@ class SettingDB(BaseDB):
 
 
 database.open()
-env: lmdb.Environment | None = database.env
+env: LmdbEnvironment | None = database.env
 
 
 @enum.unique
